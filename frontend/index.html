@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StockCast — AI Time Series Forecaster</title>
+  <meta name="description" content="AI-powered stock price prediction using Enhanced DLinear with technical indicators" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    /* ── RESET & BASE ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-primary:    #0b0f1a;
+      --bg-card:       rgba(15, 20, 35, 0.85);
+      --bg-card-hover: rgba(20, 28, 50, 0.9);
+      --bg-input:      rgba(20, 30, 55, 0.7);
+      --border-subtle: rgba(100, 130, 200, 0.1);
+      --border-hover:  rgba(100, 150, 255, 0.25);
+      --text-primary:  #f0f2f7;
+      --text-secondary:#b0b8cc;
+      --text-muted:    #6b7590;
+      --accent-blue:   #5b8def;
+      --accent-green:  #34d399;
+      --accent-purple: #a78bfa;
+      --accent-amber:  #fbbf24;
+      --accent-red:    #f87171;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── BACKGROUND GRADIENT ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse at 15% 15%, rgba(91, 141, 239, 0.07) 0%, transparent 55%),
+        radial-gradient(ellipse at 85% 85%, rgba(167, 139, 250, 0.05) 0%, transparent 55%),
+        radial-gradient(ellipse at 50% 40%, rgba(52, 211, 153, 0.03) 0%, transparent 55%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── LAYOUT ── */
+    .app-header {
+      position: relative;
+      z-index: 10;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border-subtle);
+      backdrop-filter: blur(24px);
+    }
+    .app-header-inner {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 16px 28px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .app-main {
+      position: relative;
+      z-index: 10;
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 24px 28px 40px;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 24px;
+    }
+    @media (max-width: 1024px) {
+      .app-main { grid-template-columns: 1fr; }
+    }
+
+    /* ── GLASS CARD ── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 24px;
+      backdrop-filter: blur(16px);
+      transition: border-color 0.3s ease;
+    }
+    .card:hover {
+      border-color: var(--border-hover);
+    }
+
+    /* ── CARD HEADER ── */
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .card-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+    .card-icon.blue   { background: rgba(91, 141, 239, 0.12); }
+    .card-icon.green  { background: rgba(52, 211, 153, 0.12); }
+    .card-icon.purple { background: rgba(167, 139, 250, 0.12); }
+    .card-icon.amber  { background: rgba(251, 191, 36, 0.12); }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+    .card-subtitle {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 1px;
+    }
+
+    /* ── BUTTONS ── */
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 12px 16px;
+      border: none;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      color: #ffffff;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      letter-spacing: 0.01em;
+    }
+    .btn:disabled {
+      background: rgba(50, 55, 75, 0.6) !important;
+      box-shadow: none !important;
+      color: rgba(150, 155, 170, 0.5);
+      cursor: not-allowed;
+      transform: none !important;
+    }
+    .btn:not(:disabled):hover {
+      transform: translateY(-1px);
+    }
+    .btn:not(:disabled):active {
+      transform: translateY(0);
+    }
+
+    .btn-blue {
+      background: linear-gradient(135deg, #4a7cdf, #5b8def);
+      box-shadow: 0 4px 20px rgba(91, 141, 239, 0.25);
+    }
+    .btn-blue:not(:disabled):hover { box-shadow: 0 6px 28px rgba(91, 141, 239, 0.4); }
+
+    .btn-green {
+      background: linear-gradient(135deg, #059669, #10b981);
+      box-shadow: 0 4px 20px rgba(16, 185, 129, 0.25);
+    }
+    .btn-green:not(:disabled):hover { box-shadow: 0 6px 28px rgba(16, 185, 129, 0.4); }
+
+    .btn-purple {
+      background: linear-gradient(135deg, #7c3aed, #9f67ff);
+      box-shadow: 0 4px 20px rgba(139, 92, 246, 0.25);
+    }
+    .btn-purple:not(:disabled):hover { box-shadow: 0 6px 28px rgba(139, 92, 246, 0.4); }
+
+    /* ── FILE INPUT ── */
+    .file-drop {
+      position: relative;
+      border: 2px dashed rgba(91, 141, 239, 0.25);
+      border-radius: 12px;
+      padding: 22px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      margin-bottom: 14px;
+    }
+    .file-drop:hover {
+      border-color: rgba(91, 141, 239, 0.5);
+      background: rgba(91, 141, 239, 0.04);
+    }
+    .file-drop input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+    .file-drop-text {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .file-drop-text span {
+      color: var(--accent-blue);
+      font-weight: 500;
+    }
+
+    /* ── SELECT ── */
+    .select-field {
+      width: 100%;
+      padding: 10px 14px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      color: var(--text-primary);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      transition: all 0.25s ease;
+      margin-bottom: 14px;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7590' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+    }
+    .select-field:focus {
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.12);
+    }
+
+    /* ── STATUS ── */
+    .status-box {
+      background: rgba(25, 32, 55, 0.5);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      padding: 10px 14px;
+      margin-top: 14px;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+    .status-text {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    /* ── LABEL ── */
+    .field-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+
+    /* ── CHART AREA ── */
+    .chart-area {
+      position: relative;
+      height: 400px;
+    }
+    .chart-badge {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .chart-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .chart-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .chart-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .chart-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    /* ── METRIC CARD ── */
+    .metric-card {
+      background: rgba(25, 35, 60, 0.4);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .metric-col-name {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 10px;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      text-align: center;
+    }
+    .metric-value {
+      font-weight: 700;
+      line-height: 1.2;
+    }
+    .metric-value.big { font-size: 18px; }
+    .metric-value.med { font-size: 14px; }
+    .metric-label {
+      font-size: 9px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-top: 3px;
+    }
+    .color-blue   { color: var(--accent-blue); }
+    .color-green  { color: var(--accent-green); }
+    .color-purple { color: var(--accent-purple); }
+    .color-amber  { color: var(--accent-amber); }
+    .color-red    { color: var(--accent-red); }
+
+    /* ── TRAINING PULSE ── */
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 6px rgba(251, 191, 36, 0.15); }
+      50% { box-shadow: 0 0 22px rgba(251, 191, 36, 0.35); }
+    }
+    .training-pulse {
+      animation: pulse-glow 2s ease-in-out infinite;
+      border-color: rgba(251, 191, 36, 0.3) !important;
+    }
+
+    /* ── ANIMATIONS ── */
+    @keyframes fadeSlideUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .anim-in {
+      animation: fadeSlideUp 0.5s ease forwards;
+    }
+    .anim-d1 { animation-delay: 0.05s; opacity: 0; }
+    .anim-d2 { animation-delay: 0.15s; opacity: 0; }
+    .anim-d3 { animation-delay: 0.25s; opacity: 0; }
+    .anim-d4 { animation-delay: 0.35s; opacity: 0; }
+
+    /* ── HIDDEN ── */
+    .hidden { display: none !important; }
+
+    /* ── SCROLLBAR ── */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(100, 120, 160, 0.25); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(100, 120, 160, 0.4); }
+
+    /* ── LOGO ── */
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #5b8def, #7c3aed);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: 800;
+      font-size: 13px;
+      box-shadow: 0 4px 16px rgba(91, 141, 239, 0.3);
+      flex-shrink: 0;
+    }
+    .logo-text {
+      font-size: 18px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #5b8def, #a78bfa, #34d399);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .logo-sub {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 500;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header-tag {
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 4px 10px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      font-weight: 500;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      background: var(--accent-green);
+      border-radius: 50%;
+      box-shadow: 0 0 8px rgba(52, 211, 153, 0.5);
+    }
+
+    /* ── DIVIDERS ── */
+    .divider {
+      height: 1px;
+      background: var(--border-subtle);
+      margin: 16px 0;
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<header class="app-header">
+  <div class="app-header-inner">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <div class="logo-icon">SC</div>
+      <div>
+        <div class="logo-text">StockCast</div>
+        <div class="logo-sub">AI Time Series Forecaster</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="header-tag">DLinear v2 + RevIN</span>
+      <div class="status-dot" title="Backend online"></div>
+    </div>
+  </div>
+</header>
+
+<!-- ═══════════════ MAIN ═══════════════ -->
+<main class="app-main">
+
+  <!-- ─── LEFT SIDEBAR ─── -->
+  <aside style="display:flex; flex-direction:column; gap:16px;">
+
+    <!-- Upload Card -->
+    <div class="card anim-in anim-d1">
+      <div class="card-header">
+        <div class="card-icon blue">📁</div>
+        <div>
+          <div class="card-title">Data Source</div>
+          <div class="card-subtitle">Upload your CSV dataset</div>
+        </div>
+      </div>
+
+      <div class="file-drop" id="dropZone">
+        <input type="file" id="csvFile" accept=".csv" />
+        <div class="file-drop-text" id="fileLabel">
+          <span>Browse</span> or drop your CSV here
+        </div>
+      </div>
+
+      <button onclick="upload()" class="btn btn-blue">
+        ⬆ Upload Dataset
+      </button>
+    </div>
+
+    <!-- Train Card -->
+    <div class="card anim-in anim-d2">
+      <div class="card-header">
+        <div class="card-icon green">🧠</div>
+        <div>
+          <div class="card-title">Model Training</div>
+          <div class="card-subtitle">Enhanced DLinear v2 architecture</div>
+        </div>
+      </div>
+
+      <button id="trainBtn" onclick="train()" disabled class="btn btn-green">
+        ▶ Train Model
+      </button>
+
+      <div id="statusBadge" class="status-box">
+        <p id="status" class="status-text">Upload a CSV to begin</p>
+      </div>
+    </div>
+
+    <!-- Predict Card -->
+    <div class="card anim-in anim-d3">
+      <div class="card-header">
+        <div class="card-icon purple">🔮</div>
+        <div>
+          <div class="card-title">Prediction</div>
+          <div class="card-subtitle">Forecast future prices</div>
+        </div>
+      </div>
+
+      <label class="field-label">Forecast Horizon</label>
+      <select id="horizon" class="select-field">
+        <option value="1">Next 1 Day</option>
+        <option value="7">Next 7 Days</option>
+        <option value="15">Next 15 Days</option>
+        <option value="30" selected>Next 30 Days</option>
+      </select>
+
+      <button id="predictBtn" onclick="predict()" disabled class="btn btn-purple">
+        ✨ Generate Forecast
+      </button>
+    </div>
+
+    <!-- Metrics Card -->
+    <div id="metricsSection" class="card anim-in anim-d4 hidden">
+      <div class="card-header">
+        <div class="card-icon amber">📊</div>
+        <div>
+          <div class="card-title">Model Accuracy</div>
+          <div class="card-subtitle">Backtest performance metrics</div>
+        </div>
+      </div>
+      <div id="metricsCards" style="display:flex; flex-direction:column; gap:10px;"></div>
+    </div>
+
+  </aside>
+
+  <!-- ─── RIGHT PANEL — Charts ─── -->
+  <section style="display:flex; flex-direction:column; gap:20px;">
+
+    <!-- Forecast Chart -->
+    <div class="card anim-in anim-d2">
+      <div class="chart-header">
+        <div class="chart-header-left">
+          <div class="chart-dot" style="background: var(--accent-blue);"></div>
+          <h2 class="chart-title">Forecast Visualization</h2>
+        </div>
+        <span class="chart-badge">Live Prediction</span>
+      </div>
+      <div class="chart-area">
+        <canvas id="chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Backtest Chart -->
+    <div id="backtestSection" class="card hidden">
+      <div class="chart-header">
+        <div class="chart-header-left">
+          <div class="chart-dot" style="background: var(--accent-green);"></div>
+          <h2 class="chart-title">Backtest — Actual vs Predicted</h2>
+        </div>
+        <span class="chart-badge" id="backtestLabel">Test Results</span>
+      </div>
+      <div class="chart-area">
+        <canvas id="backtestChart"></canvas>
+      </div>
+    </div>
+
+  </section>
+
+</main>
+
+<script src="script.js"></script>
+
+<script>
+  // File input label update
+  document.getElementById("csvFile").addEventListener("change", function() {
+    const label = document.getElementById("fileLabel");
+    if (this.files.length > 0) {
+      label.innerHTML = '<span style="color:#34d399">✓</span> ' + this.files[0].name;
+    }
+  });
+</script>
+
+</body>
+</html>

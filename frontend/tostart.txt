@@ -1,0 +1,2 @@
+ npx tailwindcss -i ./style.css -o ./output.css --watch
+ uvicorn app.main:app --reload
