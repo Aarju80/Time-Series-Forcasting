@@ -3,6 +3,55 @@ import numpy as np
 import pandas as pd
 
 
+# ═══════════════════════════════════════════════════════════
+# Utility: Log Returns
+# ═══════════════════════════════════════════════════════════
+
+def compute_log_returns(data: np.ndarray) -> np.ndarray:
+    """
+    Convert price array to log returns per channel.
+
+    data:    [T, C] raw prices
+    returns: [T-1, C] log returns  (log(p[t] / p[t-1]))
+
+    Numerically stable: clamps ratios to avoid log(0) or log(negative).
+    """
+    # Ensure prices are positive
+    data_safe = np.maximum(data, 1e-8)
+    ratios = data_safe[1:] / data_safe[:-1]
+    # Clamp ratios to [0.5, 2.0] to prevent extreme log returns
+    ratios = np.clip(ratios, 0.5, 2.0)
+    log_ret = np.log(ratios).astype(np.float32)
+    # Final NaN/inf guard
+    log_ret = np.nan_to_num(log_ret, nan=0.0, posinf=0.0, neginf=0.0)
+    return log_ret
+
+
+def reconstruct_prices_from_returns(
+    log_returns: np.ndarray,
+    last_prices: np.ndarray,
+) -> np.ndarray:
+    """
+    Convert log-return predictions back to prices.
+
+    log_returns: [H, C] predicted log returns
+    last_prices: [C]    last observed price per channel
+    returns:     [H, C] reconstructed prices
+    """
+    prices = np.zeros_like(log_returns)
+    prev = last_prices.copy()
+    for t in range(len(log_returns)):
+        # Clamp returns to prevent extreme price jumps
+        clipped = np.clip(log_returns[t], -0.5, 0.5)
+        prices[t] = prev * np.exp(clipped)
+        prev = prices[t]
+    return prices
+
+
+# ═══════════════════════════════════════════════════════════
+# Technical Indicators
+# ═══════════════════════════════════════════════════════════
+
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add technical indicators computed from the 'close' column
@@ -59,34 +108,43 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ═══════════════════════════════════════════════════════════
+# Dataset
+# ═══════════════════════════════════════════════════════════
+
 class TimeSeriesDataset(torch.utils.data.Dataset):
     """
-    Sliding-window time series dataset with per-split indicator computation.
+    Sliding-window time series dataset.
 
-    IMPORTANT: Technical indicators are computed ONLY from the data passed to
-    this dataset, preventing information leakage between train and validation
-    splits. The raw OHLCV data is split first, then indicators are computed
-    independently for each split.
+    Supports two target modes:
+      - Raw prices (v2 default):  y = normalized price window
+      - Log returns (v3):         y = log(p[t+1]/p[t]) per channel
 
-    x: [seq_len, C]     (input window)
-    y: [pred_len, C]    (target window)
+    Technical indicators are computed ONLY from the data passed to
+    this dataset, preventing information leakage between splits.
+
+    x: [seq_len, C]     (input window, always normalized prices)
+    y: [pred_len, C]    (target: normalized prices OR log returns)
     """
 
     def __init__(self, raw_data: np.ndarray, raw_columns: list,
                  seq_len: int, pred_len: int,
                  global_mean: np.ndarray = None,
-                 global_std: np.ndarray = None):
+                 global_std: np.ndarray = None,
+                 use_log_returns: bool = False):
         """
         Args:
-            raw_data:     NumPy array [T, C_raw] of raw OHLCV values (NOT normalized)
-            raw_columns:  List of column names matching raw_data columns
-            seq_len:      Lookback window length
-            pred_len:     Prediction horizon length
-            global_mean:  Per-column mean for z-score normalization
-            global_std:   Per-column std for z-score normalization
+            raw_data:        NumPy array [T, C_raw] of raw OHLCV values (NOT normalized)
+            raw_columns:     List of column names matching raw_data columns
+            seq_len:         Lookback window length
+            pred_len:        Prediction horizon length
+            global_mean:     Per-column mean for z-score normalization
+            global_std:      Per-column std for z-score normalization
+            use_log_returns: If True, targets are log returns instead of raw prices
         """
         self.seq_len = seq_len
         self.pred_len = pred_len
+        self.use_log_returns = use_log_returns
 
         # Step 1: Build DataFrame from raw data
         df = pd.DataFrame(raw_data, columns=raw_columns)
@@ -101,14 +159,15 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
         self.columns = df.columns.tolist()
         data = df.values.astype(np.float32)
 
+        # Store raw (un-normalized) prices for log-return computation
+        self.raw_prices = data.copy()
+
         # Step 4: Normalize
         if global_mean is not None and global_std is not None:
-            # Extend global stats if new indicator columns were added
             c_raw = len(global_mean)
             c_total = data.shape[1]
 
             if c_total > c_raw:
-                # Compute local stats for indicator columns
                 indicator_data = data[:, c_raw:]
                 ind_mean = indicator_data.mean(axis=0)
                 ind_std = indicator_data.std(axis=0)
@@ -126,6 +185,10 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
         self.std[self.std < 1e-6] = 1.0
         self.data = (data - self.mean) / self.std
 
+        # Pre-compute log returns from raw prices if needed
+        if self.use_log_returns:
+            self.log_returns = compute_log_returns(self.raw_prices)
+
         # Safe length calculation
         self.length = max(0, len(self.data) - self.seq_len - self.pred_len + 1)
 
@@ -137,7 +200,26 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
             raise IndexError("Index out of range")
 
         x = self.data[idx: idx + self.seq_len]
-        y = self.data[idx + self.seq_len: idx + self.seq_len + self.pred_len]
+
+        if self.use_log_returns:
+            # log_returns[i] = log(price[i+1] / price[i])
+            # For prediction window starting at seq_len, we need returns:
+            #   from price[idx+seq_len-1] → price[idx+seq_len]
+            #   from price[idx+seq_len]   → price[idx+seq_len+1]
+            #   etc.
+            # log_returns index = price index (for the "from" price)
+            # So log_returns[idx+seq_len-1] through log_returns[idx+seq_len+pred_len-2]
+            ret_start = idx + self.seq_len - 1
+            ret_end = ret_start + self.pred_len
+            ret_end = min(ret_end, len(self.log_returns))
+            y = self.log_returns[ret_start:ret_end]
+
+            # Pad if needed
+            if len(y) < self.pred_len:
+                pad = np.zeros((self.pred_len - len(y), y.shape[1]), dtype=np.float32)
+                y = np.concatenate([y, pad], axis=0)
+        else:
+            y = self.data[idx + self.seq_len: idx + self.seq_len + self.pred_len]
 
         return (
             torch.tensor(x, dtype=torch.float32),

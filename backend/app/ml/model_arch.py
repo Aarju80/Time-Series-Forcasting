@@ -89,9 +89,14 @@ class series_decomp_multi(nn.Module):
 
 class Model(nn.Module):
     """
-    Enhanced DLinear v2 — Controlled Architecture Upgrade.
+    Enhanced DLinear v3 — Architecture with Log-Return Support.
 
-    Improvements over v1:
+    Improvements over v2:
+      - Optional skip_revin_denorm for log-return targets
+        (RevIN normalizes input but does NOT denormalize output,
+         since log-return targets are in a different space)
+
+    v2 features preserved:
       - Optional channel mixing layer (cross-feature interaction)
       - Optional nonlinear residual temporal block (GELU activation)
       - Dropout regularization
@@ -99,8 +104,8 @@ class Model(nn.Module):
       - Individual linear layers per channel
       - RevIN normalization
 
-    All new modules are optional and controlled via config flags.
-    Fully backward-compatible with v1 checkpoints via strict=False loading.
+    All modules are optional and controlled via config flags.
+    Fully backward-compatible with v1/v2 checkpoints via strict=False.
     """
 
     def __init__(self, configs):
@@ -113,6 +118,7 @@ class Model(nn.Module):
         # Feature flags (with safe defaults for backward compat)
         self.use_channel_mixer = getattr(configs, "use_channel_mixer", False)
         self.use_residual_block = getattr(configs, "use_residual_block", False)
+        self.skip_revin_denorm = getattr(configs, "skip_revin_denorm", False)
         dropout_rate = getattr(configs, "dropout_rate", 0.0)
 
         # RevIN
@@ -192,7 +198,8 @@ class Model(nn.Module):
         # ── Back to [B, pred_len, C] ──
         out = out.permute(0, 2, 1)
 
-        # ── RevIN denormalize ──
-        out = self.revin(out, mode="denorm")
+        # ── RevIN denormalize (skip when target is log returns) ──
+        if not self.skip_revin_denorm:
+            out = self.revin(out, mode="denorm")
 
         return out

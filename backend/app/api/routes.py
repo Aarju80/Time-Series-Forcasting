@@ -1,10 +1,10 @@
 import threading
-from fastapi import APIRouter, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException
 import shutil
 import os
 import numpy as np
 
-from app.config import DATA_PATH, CHECKPOINT_PATH, DATA_DIR, SEQ_LEN, PRED_LEN
+from app.config import DATA_PATH, CHECKPOINT_PATH, DATA_DIR, SEQ_LEN, PRED_LEN, USE_RECURSIVE_FORECAST
 from app.training.train_dlinear import train_model
 from app.ml.inference import predict_future, clear_model_cache
 from app.utils.parse_csv import parse_csv
@@ -40,23 +40,29 @@ async def upload(file: UploadFile = File(...)):
 
 
 @router.post("/train")
-def train(background_tasks: BackgroundTasks):
+def train():
     if not os.path.exists(DATA_PATH):
         raise HTTPException(400, "Upload a CSV file first")
 
     set_status("training", "Training started")
 
     def run():
+        import sys
+        import traceback
+        sys.stderr.write("[TRAIN] Thread started\n")
+        sys.stderr.flush()
         try:
             train_model(DATA_PATH)
             clear_model_cache()
             set_status("done", "Training complete")
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            sys.stderr.write(f"[TRAIN] ERROR: {e}\n")
+            sys.stderr.write(traceback.format_exc())
+            sys.stderr.flush()
             set_status("error", str(e))
 
-    background_tasks.add_task(run)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
     return {"message": "Training started in background"}
 
 
@@ -78,21 +84,22 @@ def predict(horizon: int):
     if not os.path.exists(CHECKPOINT_PATH):
         raise HTTPException(500, "Model checkpoint not found. Retrain required.")
 
-    if horizon < 1 or horizon > PRED_LEN:
+    # v3: recursive mode supports any horizon; direct mode caps at PRED_LEN
+    max_horizon = 365 if USE_RECURSIVE_FORECAST else PRED_LEN
+    if horizon < 1 or horizon > max_horizon:
         raise HTTPException(
             400,
-            f"Horizon must be between 1 and {PRED_LEN}, got {horizon}"
+            f"Horizon must be between 1 and {max_horizon}, got {horizon}"
         )
 
     df = parse_csv(DATA_PATH)
 
-    if df.shape[0] < SEQ_LEN:
-        raise HTTPException(
-            400,
-            f"Not enough rows. Need at least {SEQ_LEN}"
-        )
+    # Use the larger of config SEQ_LEN or available data
+    fetch_len = min(SEQ_LEN, df.shape[0])
+    if df.shape[0] < 10:
+        raise HTTPException(400, f"Not enough rows. Need at least 10, got {df.shape[0]}")
 
-    series = df.iloc[-SEQ_LEN:].to_numpy()
+    series = df.iloc[-fetch_len:].to_numpy()
 
     try:
         preds = predict_future(series, horizon)
@@ -113,7 +120,12 @@ def predict(horizon: int):
 def backtest():
     """
     Run backtest on the test split (last 20%) of data.
-    Returns actual vs predicted for visualization + accuracy metrics.
+    
+    In recursive mode: uses 1-step rolling evaluation (each prediction uses
+    real previous data, not its own predictions). This tests the model's
+    actual strength without compounding errors.
+    
+    In direct mode: uses the original multi-step window evaluation.
     """
     current = get_status()
 
@@ -134,30 +146,62 @@ def backtest():
     split_idx = int(len(data) * 0.8)
     test_data = data[split_idx:]
 
-    if len(test_data) < SEQ_LEN + PRED_LEN:
-        raise HTTPException(400, "Not enough test data for backtesting")
-
-    # Rolling-window predictions on test set
     actuals_all = []
     preds_all = []
 
-    step = PRED_LEN  # non-overlapping windows
-    for i in range(0, len(test_data) - SEQ_LEN - PRED_LEN + 1, step):
-        window = test_data[i : i + SEQ_LEN]
-        actual = test_data[i + SEQ_LEN : i + SEQ_LEN + PRED_LEN]
+    if USE_RECURSIVE_FORECAST:
+        # ─── 1-step rolling evaluation ───
+        # Each step: use real data as input, predict 1 step, compare with actual
+        # This avoids error compounding and tests the model's true 1-step accuracy
+        if len(test_data) < SEQ_LEN + 1:
+            raise HTTPException(400, "Not enough test data for backtesting")
 
-        try:
-            pred = predict_future(window, PRED_LEN)
-        except Exception:
-            continue
+        # Need data before test split for initial window
+        full_data = data
+        test_start = split_idx
 
-        # Extract only original columns
-        actual_orig = actual[:, original_indices].tolist()
-        pred_orig = [[p[idx] for idx in range(len(original_cols))]
-                      for p in pred] if len(pred) > 0 else []
+        for i in range(test_start, len(full_data) - 1):
+            window_start = i - SEQ_LEN
+            if window_start < 0:
+                continue
 
-        actuals_all.extend(actual_orig)
-        preds_all.extend(pred_orig)
+            window = full_data[window_start:i]  # [SEQ_LEN, C] real data
+            actual_next = full_data[i:i + 1]     # [1, C] actual next step
+
+            try:
+                pred = predict_future(window, 1)  # predict just 1 step
+            except Exception:
+                continue
+
+            actual_orig = actual_next[:, original_indices].tolist()
+            pred_orig = [[p[idx] for idx in range(len(original_cols))]
+                          for p in pred] if len(pred) > 0 else []
+
+            actuals_all.extend(actual_orig)
+            preds_all.extend(pred_orig)
+    else:
+        # ─── Multi-step window evaluation (v2 style) ───
+        bt_horizon = PRED_LEN
+
+        if len(test_data) < SEQ_LEN + bt_horizon:
+            raise HTTPException(400, "Not enough test data for backtesting")
+
+        step = bt_horizon
+        for i in range(0, len(test_data) - SEQ_LEN - bt_horizon + 1, step):
+            window = test_data[i : i + SEQ_LEN]
+            actual = test_data[i + SEQ_LEN : i + SEQ_LEN + bt_horizon]
+
+            try:
+                pred = predict_future(window, bt_horizon)
+            except Exception:
+                continue
+
+            actual_orig = actual[:, original_indices].tolist()
+            pred_orig = [[p[idx] for idx in range(len(original_cols))]
+                          for p in pred] if len(pred) > 0 else []
+
+            actuals_all.extend(actual_orig)
+            preds_all.extend(pred_orig)
 
     if not actuals_all:
         raise HTTPException(500, "Backtesting produced no results")
