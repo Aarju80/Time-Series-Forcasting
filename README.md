@@ -1,4 +1,4 @@
-# Time Series Forecaster
+# Time Series Forecaster 
 
 A full-stack time series forecasting app powered by **DLinear** (PyTorch) with a **FastAPI** backend and a **Tailwind CSS + Chart.js** frontend.
 
